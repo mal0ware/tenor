@@ -1,0 +1,59 @@
+[project]
+name = "tenor"
+version = "0.1.0"
+description = "Principal components and Nelson-Siegel / Diebold-Li forecasts of the US Treasury par yield curve"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy==2.5.5",
+    "pandas==3.1.1",
+    "matplotlib==3.11.2",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.2.0",
+    "ruff==0.17.6",
+    "mypy==2.4.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tenor"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "N", "SIM", "RUF", "D"]
+ignore = [
+    "D203",  # use D211: no blank line before a class docstring
+    "D213",  # use D212: summary on the first line
+    "N803",  # mathematical argument names
+    "N806",  # mathematical variable names
+    "N812",  # short capital aliases for modules (P, F, E, D)
+    "D401",  # docstrings describe what is returned
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D", "E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src"]
+
+[[tool.mypy.overrides]]
+module = ["pandas", "pandas.*", "matplotlib", "matplotlib.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
