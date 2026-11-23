@@ -1,0 +1,7 @@
+treatment,first_date,last_date,observations,maturities,pc1_pct,pc2_pct,pc3_pct,first_three_pct,pc4_pct
+"daily changes, covariance",1990-01-03,2026-10-30,9210,8,79.4116,12.6911,4.0575,96.1603,1.6996
+"daily changes, correlation",1990-01-03,2026-10-30,9210,8,74.3381,16.7153,4.4482,95.5016,2.1841
+"weekly changes, covariance",1990-01-12,2026-10-30,1921,8,80.9650,12.8171,3.5966,97.3786,1.2469
+"monthly changes, covariance",1990-02-28,2026-10-30,441,8,81.1730,14.6716,2.6580,98.5027,0.7761
+"monthly levels, covariance",1990-01-31,2026-10-30,442,8,95.4328,4.2655,0.2561,99.9543,0.0296
+"daily changes, covariance, with 20y and 30y",2006-02-10,2026-10-30,5182,10,75.5719,13.6849,6.2691,95.5259,1.8888

@@ -1,0 +1,4 @@
+factor,empirical_measure,correlation,paper_correlation,abs_correlation_with_pc
+beta1,level,0.9690,0.9700,0.8264
+beta2,slope,-0.9948,-0.9900,0.9498
+beta3,curvature,0.9983,0.9900,0.7177
