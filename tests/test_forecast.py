@@ -182,3 +182,48 @@ def test_validation():
         F.direct_ar1(np.arange(10.0), 0)
     with pytest.raises(ValueError):
         F.direct_var1(np.ones((5, 3)), 1)
+
+
+def test_factor_random_walk_is_todays_fitted_curve():
+    y, _ = _factor_panel(seed=12)
+    fs = F.recursive_forecasts(y, TAU, 6, first_target=120)
+    beta, resid = ns.fit(y, TAU)
+    np.testing.assert_allclose(fs.forecasts["ns_rw"], ns.ns_yield(beta[fs.origins], TAU))
+    # it differs from the random walk by the fit residual at the origin only
+    np.testing.assert_allclose(
+        fs.forecasts["rw"] - fs.forecasts["ns_rw"], resid[fs.origins], atol=1e-12
+    )
+
+
+def test_factor_random_walk_is_the_ar_model_with_unit_slope_imposed():
+    # On an exactly constant factor path the AR(1) regression is undefined, so
+    # check the restriction directly: c = 0, g = 1 maps beta_t to itself.
+    y, _ = _factor_panel(seed=13)
+    beta, _ = ns.fit(y, TAU)
+    design = ns.loadings(TAU)
+    fs = F.recursive_forecasts(y, TAU, 3, first_target=100, last_target=110)
+    for i, origin in enumerate(fs.origins):
+        np.testing.assert_allclose(fs.forecasts["ns_rw"][i], (0.0 + 1.0 * beta[origin]) @ design.T)
+
+
+def test_rolling_window_uses_only_the_last_rows():
+    y, _ = _factor_panel(seed=14)
+    h, window = 6, 60
+    rolled = F.recursive_forecasts(y, TAU, h, first_target=150, last_target=170, window=window)
+    for i, origin in enumerate(rolled.origins):
+        lo = origin + 1 - window
+        alone = F.recursive_forecasts(
+            y[lo:], TAU, h, first_target=origin + h - lo, last_target=origin + h - lo
+        )
+        for name in F.MODELS:
+            np.testing.assert_allclose(rolled.forecasts[name][i], alone.forecasts[name][0])
+    y2 = y.copy()
+    y2[:80] += 3.0  # before every window
+    again = F.recursive_forecasts(y2, TAU, h, first_target=150, last_target=170, window=window)
+    for name in F.MODELS:
+        np.testing.assert_array_equal(rolled.forecasts[name], again.forecasts[name])
+    recursive = F.recursive_forecasts(y, TAU, h, first_target=150, last_target=170)
+    assert not np.allclose(rolled.forecasts["ns_ar"], recursive.forecasts["ns_ar"])
+    np.testing.assert_array_equal(rolled.forecasts["rw"], recursive.forecasts["rw"])
+    with pytest.raises(ValueError):
+        F.recursive_forecasts(y, TAU, 12, first_target=150, window=14)

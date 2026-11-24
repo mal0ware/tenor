@@ -17,8 +17,16 @@ Random walk (section 3.4, competitor 1): yhat_{t+h|t}(tau) = y_t(tau).
 
 AR(1) on yield levels (section 3.4, competitor 5): yhat_{t+h|t}(tau) = c(tau) + g(tau) * y_t(tau).
 
-Estimation is recursive: a forecast made at t uses rows up to and including t
-and nothing later. Every model is evaluated on the same origins and targets.
+Nelson-Siegel with random-walk factors is not in the paper. It sets
+bihat_{t+h|t} = bihat_t, so the forecast is today's fitted curve. It is the
+Nelson-Siegel AR(1) model with c_i = 0 and g_i = 1 imposed, which makes it
+the nested benchmark that separates the cost of the curve fit from the cost of
+forecasting the factors back towards their means.
+
+Estimation is recursive by default: a forecast made at t uses rows from the
+start of the sample up to and including t and nothing later. With ``window``
+set, only the last ``window`` rows up to t are used (a rolling scheme). Every
+model is evaluated on the same origins and targets.
 """
 
 from __future__ import annotations
@@ -34,11 +42,12 @@ FloatArray = npt.NDArray[np.float64]
 IntArray = npt.NDArray[np.int64]
 
 #: Model keys, in the order used in tables.
-MODELS: tuple[str, ...] = ("ns_ar", "ns_var", "ar_yield", "rw")
+MODELS: tuple[str, ...] = ("ns_ar", "ns_var", "ns_rw", "ar_yield", "rw")
 
 MODEL_LABELS: dict[str, str] = {
     "ns_ar": "Nelson-Siegel, AR(1) factors",
     "ns_var": "Nelson-Siegel, VAR(1) factors",
+    "ns_rw": "Nelson-Siegel, random-walk factors",
     "ar_yield": "AR(1) on yield levels",
     "rw": "Random walk",
 }
@@ -146,6 +155,7 @@ def recursive_forecasts(
     *,
     lam: float = ns.DL_LAMBDA,
     start: int = 0,
+    window: int | None = None,
 ) -> ForecastSet:
     """Forecast every target row from ``first_target`` to ``last_target``.
 
@@ -164,6 +174,9 @@ def recursive_forecasts(
         Nelson-Siegel decay.
     start:
         First row of the estimation sample. Rows before it are never used.
+    window:
+        If given, each forecast is estimated on the last ``window`` rows up to
+        its origin (never reaching before ``start``). ``None`` is recursive.
 
     """
     y = np.asarray(yields, dtype=np.float64)
@@ -184,11 +197,15 @@ def recursive_forecasts(
     origins = targets - h
     shape = (targets.size, y.shape[1])
     out = {name: np.empty(shape, dtype=np.float64) for name in MODELS}
+    if window is not None and window - h < 5:
+        raise ValueError("window is too short for the horizon")
     for i, origin in enumerate(origins):
-        known_beta = beta[start : origin + 1]
-        known_y = y[start : origin + 1]
+        lo = start if window is None else max(start, origin + 1 - window)
+        known_beta = beta[lo : origin + 1]
+        known_y = y[lo : origin + 1]
         out["ns_ar"][i] = direct_ar1_forecast(known_beta, h) @ design.T
         out["ns_var"][i] = direct_var1_forecast(known_beta, h) @ design.T
+        out["ns_rw"][i] = beta[origin] @ design.T
         out["ar_yield"][i] = direct_ar1_forecast(known_y, h)
         out["rw"][i] = y[origin]
     return ForecastSet(

@@ -1,8 +1,9 @@
-"""Build every table and figure from a daily par yield panel.
+"""Build every table and figure from a par yield panel and a zero-coupon panel.
 
-``run`` is the single entry point. It is deterministic: the same panel gives
-byte-identical tables. ``scripts/reproduce.py`` calls it on the Treasury data;
-the tests and the CI smoke run call it on a simulated panel.
+``run`` is the single entry point. It is deterministic: the same panels give
+byte-identical tables. ``scripts/reproduce.py`` calls it on the Treasury and
+Federal Reserve data; the tests and the CI smoke run call it on simulated
+panels.
 """
 
 from __future__ import annotations
@@ -26,46 +27,75 @@ from tenor import forecast as F
 from tenor import nelson_siegel as ns
 from tenor import pca as P
 from tenor import published
+from tenor import size_sim as S
 
 FloatArray = npt.NDArray[np.float64]
 
-COLOURS = {"pc1": "#1f4e79", "pc2": "#c0504d", "pc3": "#6b8e23", "grey": "#7f7f7f"}
-HORIZON_COLOURS = {1: "#9ecae1", 6: "#4292c6", 12: "#08306b"}
+INK = "#1b1f24"
+MUTED = "#6b7280"
+COLOURS = {"pc1": "#12355b", "pc2": "#c2622d", "pc3": "#5b8a3a"}
+HORIZON_COLOURS = {1: "#8fb8de", 6: "#3f7fbf", 12: "#12355b"}
+PERIOD_COLOURS = ("#12355b", "#3f7fbf", "#c2622d", "#5b8a3a")
+MODEL_COLOURS = {"ns_ar": "#12355b", "ar_yield": "#3f7fbf", "ns_rw": "#c2622d"}
 
 
 @dataclass(frozen=True)
 class Config:
-    """Settings fixed before any result was looked at.
+    """Settings for the committed results.
 
     Attributes
     ----------
     horizons:
         Forecast horizons in months.
+    zero_start:
+        First month of the zero-coupon estimation sample. 1985-01 is the first
+        month of Diebold and Li's sample.
+    zero_first_target:
+        First forecast target on the zero-coupon panel. 1994-01 is the paper's.
+    zero_subperiods:
+        Labels and inclusive target-month ranges that split the zero-coupon
+        targets. The first is the paper's evaluation window.
     initial_months:
-        Months of data before the first forecast target of the main sample.
-        108 is the length of the paper's first estimation window, 1985:01 to
-        1993:12.
+        Months of par yield data before the first par forecast target. 108 is
+        the length of the paper's first estimation window.
+    par_subperiods:
+        The same kind of split for the par yield targets.
+    zero_bound:
+        Target months left out of the "excluding" sample.
+    rolling_estimation_months:
+        Window length of the rolling estimation scheme.
     rolling_window:
         Trading days per rolling principal-components window (about 5 years).
     rolling_step:
         Trading days between rolling windows.
-    paper_window:
-        First and last forecast target of the paper's own evaluation period.
-    subperiods:
-        Labels and inclusive target-month ranges used to split the main sample.
+    crisis_window:
+        Dates over which the 3-month yield's daily volatility is tabulated.
+    size_simulations:
+        Simulations per cell of the test-size table.
 
     """
 
     horizons: tuple[int, ...] = (1, 6, 12)
+    zero_start: str = "1985-01"
+    zero_first_target: str = "1994-01"
+    zero_subperiods: tuple[tuple[str, str, str], ...] = (
+        ("1994-2000", "1994-01", "2000-12"),
+        ("2001-2008", "2001-01", "2008-12"),
+        ("2009-2017", "2009-01", "2017-12"),
+        ("2018-2026", "2018-01", "2026-12"),
+    )
     initial_months: int = 108
-    rolling_window: int = 1250
-    rolling_step: int = 21
-    paper_window: tuple[str, str] = ("1994-01", "2000-12")
-    subperiods: tuple[tuple[str, str, str], ...] = (
+    par_subperiods: tuple[tuple[str, str, str], ...] = (
         ("1999-2008", "1999-01", "2008-12"),
         ("2009-2017", "2009-01", "2017-12"),
         ("2018-2026", "2018-01", "2026-12"),
     )
+    zero_bound: tuple[str, str] = ("2009-01", "2017-12")
+    rolling_estimation_months: int = 108
+    rolling_window: int = 1250
+    rolling_step: int = 21
+    crisis_window: tuple[str, str] = ("2008-09-01", "2008-12-31")
+    size_simulations: int = 5000
 
 
 def _write_csv(frame: pd.DataFrame, path: Path, decimals: int = 4) -> None:
@@ -255,9 +285,39 @@ def ns_tables(
     return betas, residuals, factor_stats, correlations
 
 
+def ns_residuals_zero(monthly: pd.DataFrame, tau: list[float]) -> pd.DataFrame:
+    """Fit the curve to the zero-coupon panel and summarise the residuals."""
+    _, resid = ns.fit(monthly.to_numpy(), tau)
+    rows = [
+        {
+            "maturity_months": t,
+            "mean": resid[:, j].mean(),
+            "sd": resid[:, j].std(),
+            "mae": np.abs(resid[:, j]).mean(),
+            "rmse": E.rmse(resid[:, j]),
+            "acf1": E.autocorr(resid[:, j], 1),
+            "acf12": E.autocorr(resid[:, j], 12),
+        }
+        for j, t in enumerate(tau)
+    ]
+    return pd.DataFrame(rows)
+
+
 # --------------------------------------------------------------------------
 # forecasts
 # --------------------------------------------------------------------------
+
+#: (small, large) pairs in which the small model is a restricted large model.
+NESTED_PAIRS: tuple[tuple[str, str], ...] = (
+    ("rw", "ar_yield"),
+    ("ns_rw", "ns_ar"),
+    ("ns_rw", "ns_var"),
+)
+
+#: Models that contain the random walk as a special case. For these a
+#: Diebold-Mariano test against the random walk has no normal limit under
+#: recursive estimation.
+NESTS_RANDOM_WALK: frozenset[str] = frozenset({"ar_yield"})
 
 
 def _month_index(monthly: pd.DataFrame, month: str, side: str) -> int | None:
@@ -276,23 +336,33 @@ def _error_lags(h: int) -> tuple[int, int]:
     return (1, 12) if h == 1 else (h, h + 12)
 
 
+@dataclass
+class _Rows:
+    errors: list[dict[str, object]]
+    versus: list[dict[str, object]]
+    nested: list[dict[str, object]]
+
+
 def _score(
-    fs: F.ForecastSet, mask: npt.NDArray[np.bool_], tau: list[float], sample: str
-) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    """Error statistics and random-walk comparisons for the masked forecasts."""
+    fs: F.ForecastSet,
+    mask: npt.NDArray[np.bool_],
+    tau: list[float],
+    panel: str,
+    sample: str,
+    rows: _Rows,
+) -> None:
+    """Append error statistics and accuracy tests for the masked forecasts."""
     h = fs.horizon
     lag_a, lag_b = _error_lags(h)
-    err_rows: list[dict[str, object]] = []
-    cmp_rows: list[dict[str, object]] = []
+    key = {"panel": panel, "sample": sample, "horizon_months": h}
     rw = fs.errors("rw")[mask]
     for name in F.MODELS:
         err = fs.errors(name)[mask]
         for j, t in enumerate(tau):
             s = E.error_stats(err[:, j])
-            err_rows.append(
+            rows.errors.append(
                 {
-                    "sample": sample,
-                    "horizon_months": h,
+                    **key,
                     "model": name,
                     "maturity_months": t,
                     "forecasts": s.n,
@@ -307,80 +377,102 @@ def _score(
                 continue
             rw_rmse = E.rmse(rw[:, j])
             uni = E.diebold_mariano(err[:, j], rw[:, j], h=h, window="uniform")
+            hln = E.dm_hln(err[:, j], rw[:, j], h=h)
             bart = E.diebold_mariano(err[:, j], rw[:, j], h=h, window="bartlett")
-            cmp_rows.append(
+            rows.versus.append(
                 {
-                    "sample": sample,
-                    "horizon_months": h,
+                    **key,
                     "model": name,
                     "maturity_months": t,
                     "forecasts": s.n,
                     "rmse": s.rmse,
                     "rmse_random_walk": rw_rmse,
                     "rmse_ratio": s.rmse / rw_rmse,
+                    "nests_random_walk": name in NESTS_RANDOM_WALK,
                     "dm_uniform": uni.stat,
-                    "dm_uniform_p": uni.pvalue,
+                    "dm_hln": hln.stat,
+                    "dm_hln_p": hln.pvalue,
                     "dm_bartlett": bart.stat,
                     "dm_bartlett_p": bart.pvalue,
                 }
             )
-    return err_rows, cmp_rows
+    for small, large in NESTED_PAIRS:
+        e_s, e_l = fs.errors(small)[mask], fs.errors(large)[mask]
+        f_s, f_l = fs.forecasts[small][mask], fs.forecasts[large][mask]
+        for j, t in enumerate(tau):
+            cw = E.clark_west(e_s[:, j], e_l[:, j], f_s[:, j], f_l[:, j], h=h)
+            rows.nested.append(
+                {
+                    **key,
+                    "small_model": small,
+                    "large_model": large,
+                    "maturity_months": t,
+                    "forecasts": cw.n,
+                    "rmse_small": math.sqrt(cw.mspe_small),
+                    "rmse_large": math.sqrt(cw.mspe_large),
+                    "rmse_ratio": math.sqrt(cw.mspe_large / cw.mspe_small),
+                    "cw_stat": cw.stat,
+                    "cw_p_one_sided": cw.pvalue,
+                }
+            )
 
 
 def forecast_tables(
-    monthly: pd.DataFrame, cfg: Config
-) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, str]]:
-    """Run every forecast sample and score it against the random walk."""
-    tau = D.tenor_months(monthly.columns)
+    panel: str,
+    monthly: pd.DataFrame,
+    tau: list[float],
+    first_target: int,
+    subperiods: tuple[tuple[str, str, str], ...],
+    cfg: Config,
+    window: int | None = None,
+) -> tuple[_Rows, dict[str, str]]:
+    """Forecast one panel and score every sample of its target months.
+
+    The samples are "full", each of ``subperiods``, and the full sample
+    without the target months in ``cfg.zero_bound``. A sample with fewer than
+    24 forecasts, or one that would repeat "full", is skipped.
+    """
     y = monthly.to_numpy()
     periods = monthly.index.to_period("M")
-    err_rows: list[dict[str, object]] = []
-    cmp_rows: list[dict[str, object]] = []
+    rows = _Rows([], [], [])
     spans: dict[str, str] = {}
-
-    first_target = cfg.initial_months
-    if first_target < len(monthly):
-        spans["full"] = f"{periods[first_target]} to {periods[-1]}"
-        for h in cfg.horizons:
-            fs = F.recursive_forecasts(y, tau, h, first_target=first_target)
-            everything = np.ones(fs.targets.size, dtype=np.bool_)
-            e, c = _score(fs, everything, tau, "full")
-            err_rows += e
-            cmp_rows += c
-            target_periods = periods[fs.targets]
-            for label, lo, hi in cfg.subperiods:
-                mask = np.asarray(
+    if not (max(cfg.horizons) + 16 <= first_target < len(monthly)):
+        return rows, spans
+    spans["full"] = f"{periods[first_target]} to {periods[-1]}"
+    zb_lo, zb_hi = (pd.Period(m, freq="M") for m in cfg.zero_bound)
+    zb_label = f"excluding {zb_lo.year}-{zb_hi.year}"
+    for h in cfg.horizons:
+        fs = F.recursive_forecasts(y, tau, h, first_target=first_target, window=window)
+        target_periods = periods[fs.targets]
+        everything = np.ones(fs.targets.size, dtype=np.bool_)
+        _score(fs, everything, tau, panel, "full", rows)
+        masks: list[tuple[str, npt.NDArray[np.bool_]]] = [
+            (
+                label,
+                np.asarray(
                     (target_periods >= pd.Period(lo, freq="M"))
                     & (target_periods <= pd.Period(hi, freq="M"))
-                )
-                if mask.sum() < 24:
-                    continue
+                ),
+            )
+            for label, lo, hi in subperiods
+        ]
+        masks.append((zb_label, np.asarray((target_periods < zb_lo) | (target_periods > zb_hi))))
+        for label, mask in masks:
+            if mask.sum() < 24 or mask.all():
+                continue
+            if label == zb_label:
+                spans[label] = f"{spans['full']} without {zb_lo} to {zb_hi}"
+            else:
                 spans[label] = f"{target_periods[mask][0]} to {target_periods[mask][-1]}"
-                e, c = _score(fs, mask, tau, label)
-                err_rows += e
-                cmp_rows += c
-
-    lo_idx = _month_index(monthly, cfg.paper_window[0], "left")
-    hi_idx = _month_index(monthly, cfg.paper_window[1], "right")
-    max_h = max(cfg.horizons)
-    if lo_idx is not None and hi_idx is not None and hi_idx > lo_idx and lo_idx - max_h >= 16:
-        spans["paper window"] = f"{periods[lo_idx]} to {periods[hi_idx]}"
-        for h in cfg.horizons:
-            fs = F.recursive_forecasts(y, tau, h, first_target=lo_idx, last_target=hi_idx)
-            everything = np.ones(fs.targets.size, dtype=np.bool_)
-            e, c = _score(fs, everything, tau, "paper window")
-            err_rows += e
-            cmp_rows += c
-    return pd.DataFrame(err_rows), pd.DataFrame(cmp_rows), spans
+            _score(fs, mask, tau, panel, label, rows)
+    return rows, spans
 
 
-def paper_comparison(errors: pd.DataFrame, versus: pd.DataFrame) -> pd.DataFrame:
-    """Set this repository's paper-window numbers beside the printed ones."""
+def paper_comparison(errors: pd.DataFrame, versus: pd.DataFrame, sample: str) -> pd.DataFrame:
+    """Set the zero-coupon paper-window numbers beside the printed ones."""
+    sub_e = errors[(errors["panel"] == "zero") & (errors["sample"] == sample)]
+    sub_v = versus[(versus["panel"] == "zero") & (versus["sample"] == sample)]
     rows = []
-    sub_e = errors[errors["sample"] == "paper window"]
-    sub_v = versus[versus["sample"] == "paper window"]
-    if sub_e.empty:
-        return pd.DataFrame()
     for model, by_h in published.DL_RMSE.items():
         for h, printed in by_h.items():
             for tau, paper_rmse in zip(published.DL_MATURITIES, printed, strict=True):
@@ -391,17 +483,19 @@ def paper_comparison(errors: pd.DataFrame, versus: pd.DataFrame) -> pd.DataFrame
                 ]
                 if here.empty:
                     continue
+                k = published.DL_MATURITIES.index(tau)
+                rmse_here = float(here["rmse"].iloc[0])
                 row: dict[str, object] = {
                     "horizon_months": h,
                     "model": model,
                     "maturity_months": float(tau),
-                    "rmse_here": float(here["rmse"].iloc[0]),
+                    "forecasts": int(here["forecasts"].iloc[0]),
+                    "rmse_here": rmse_here,
                     "rmse_paper": paper_rmse,
+                    "rmse_gap": rmse_here - paper_rmse,
+                    "ratio_to_rw_paper": paper_rmse / published.DL_RMSE["rw"][h][k],
                 }
-                paper_rw = published.DL_RMSE["rw"][h][published.DL_MATURITIES.index(tau)]
-                row["ratio_to_rw_paper"] = paper_rmse / paper_rw
-                dm_here = math.nan
-                ratio_here = 1.0
+                ratio_here, dm_here, dm_hln, dm_hln_p = 1.0, math.nan, math.nan, math.nan
                 if model != "rw":
                     v = sub_v[
                         (sub_v["model"] == model)
@@ -410,109 +504,263 @@ def paper_comparison(errors: pd.DataFrame, versus: pd.DataFrame) -> pd.DataFrame
                     ]
                     ratio_here = float(v["rmse_ratio"].iloc[0])
                     dm_here = float(v["dm_uniform"].iloc[0])
+                    dm_hln = float(v["dm_hln"].iloc[0])
+                    dm_hln_p = float(v["dm_hln_p"].iloc[0])
                 row["ratio_to_rw_here"] = ratio_here
                 row["dm_vs_rw_here"] = dm_here
                 dm_paper = math.nan
                 if model == "ns_ar" and h in published.DL_DM_VS_RW:
-                    dm_paper = published.DL_DM_VS_RW[h][published.DL_MATURITIES.index(tau)]
+                    dm_paper = published.DL_DM_VS_RW[h][k]
                 row["dm_vs_rw_paper"] = dm_paper
+                row["dm_hln_here"] = dm_hln
+                row["dm_hln_p_here"] = dm_hln_p
                 rows.append(row)
+    if not rows:
+        return pd.DataFrame()
     cols = [
         "horizon_months",
         "model",
         "maturity_months",
+        "forecasts",
         "rmse_here",
         "rmse_paper",
+        "rmse_gap",
         "ratio_to_rw_here",
         "ratio_to_rw_paper",
         "dm_vs_rw_here",
         "dm_vs_rw_paper",
+        "dm_hln_here",
+        "dm_hln_p_here",
     ]
     return pd.DataFrame(rows)[cols].sort_values(
         ["horizon_months", "model", "maturity_months"], kind="stable"
     )
 
 
+def bill_volatility(daily: pd.DataFrame, cfg: Config) -> pd.DataFrame:
+    """Standard deviation of daily 3-month yield changes, crisis months and all."""
+    changes = D.changes_bp(daily)["3 Mo"]
+    lo, hi = cfg.crisis_window
+    rows = []
+    for label, series in (
+        (f"{lo} to {hi}", changes.loc[lo:hi]),
+        ("whole sample", changes),
+    ):
+        if len(series) < 2:
+            continue
+        rows.append(
+            {
+                "period": label,
+                "first_date": series.index[0].strftime("%Y-%m-%d"),
+                "last_date": series.index[-1].strftime("%Y-%m-%d"),
+                "daily_changes": len(series),
+                "sd_3m_change_bp": float(series.std(ddof=1)),
+                "largest_abs_3m_change_bp": float(series.abs().max()),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 # --------------------------------------------------------------------------
 # figures
 # --------------------------------------------------------------------------
 
+STYLE: dict[str, object] = {
+    "font.family": "DejaVu Sans",
+    "font.size": 9,
+    "axes.titlesize": 10,
+    "axes.titleweight": "bold",
+    "axes.titlelocation": "left",
+    "axes.labelsize": 9,
+    "axes.labelcolor": INK,
+    "axes.edgecolor": MUTED,
+    "axes.linewidth": 0.8,
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "axes.grid": True,
+    "axes.grid.axis": "y",
+    "axes.axisbelow": True,
+    "grid.color": "#e3e6ea",
+    "grid.linewidth": 0.7,
+    "xtick.color": MUTED,
+    "ytick.color": MUTED,
+    "xtick.labelcolor": INK,
+    "ytick.labelcolor": INK,
+    "text.color": INK,
+    "lines.linewidth": 1.6,
+    "lines.markersize": 4,
+    "legend.frameon": False,
+    "legend.fontsize": 8,
+    "figure.facecolor": "white",
+    "savefig.facecolor": "white",
+}
 
-def fig_rmse_ratio(versus: pd.DataFrame, spans: dict[str, str], path: Path) -> None:
-    """RMSE of the Nelson-Siegel AR forecast over the random walk's, by maturity."""
-    sub = versus[(versus["sample"] == "full") & (versus["model"] == "ns_ar")]
-    fig, ax = plt.subplots(figsize=(8.0, 4.6))
-    labels: list[str] = []
-    for h in sorted(sub["horizon_months"].unique()):
-        rows = sub[sub["horizon_months"] == h].sort_values("maturity_months")
-        labels = [_label_years(t) for t in rows["maturity_months"]]
-        ax.plot(
-            range(len(rows)),
-            rows["rmse_ratio"],
-            marker="o",
-            color=HORIZON_COLOURS.get(int(h), "black"),
-            label=f"{int(h)}-month horizon",
-        )
-    if labels:
-        paper = published.DL_RMSE
-        positions = [
-            labels.index(_label_years(t))
-            for t in published.DL_MATURITIES
-            if _label_years(t) in labels
-        ]
-        if len(positions) == len(published.DL_MATURITIES):
-            ratio = [a / b for a, b in zip(paper["ns_ar"][12], paper["rw"][12], strict=True)]
-            ax.plot(
-                positions,
-                ratio,
-                marker="s",
-                linestyle="--",
-                color=COLOURS["grey"],
-                label="12-month, as printed in Diebold-Li (1994-2000)",
-            )
-        ax.set_xticks(range(len(labels)))
-        ax.set_xticklabels(labels)
-    ax.axhline(1.0, color="black", linewidth=0.8)
+MATURITY_TICKS: tuple[float, ...] = (3.0, 12.0, 24.0, 36.0, 60.0, 84.0, 120.0)
+
+
+def _maturity_axis(ax: plt.Axes) -> None:
+    ax.set_xticks(list(MATURITY_TICKS))
+    ax.set_xticklabels([_label_years(t) for t in MATURITY_TICKS])
     ax.set_xlabel("Maturity")
-    ax.set_ylabel("Forecast RMSE / random-walk RMSE")
-    ax.set_title(
-        f"Nelson-Siegel AR(1) forecast against no change, targets {spans.get('full', '')}",
-        fontsize=10,
+
+
+def _ratio_rows(versus: pd.DataFrame, panel: str, sample: str, model: str, h: int) -> pd.DataFrame:
+    sub = versus[
+        (versus["panel"] == panel)
+        & (versus["sample"] == sample)
+        & (versus["model"] == model)
+        & (versus["horizon_months"] == h)
+    ]
+    return sub.sort_values("maturity_months")
+
+
+def fig_rmse_ratio(versus: pd.DataFrame, spans: dict[str, str], cfg: Config, path: Path) -> None:
+    """Nelson-Siegel AR(1) against the random walk: the paper's window, then the long sample.
+
+    Left: this repository's forecasts for the paper's target months beside the
+    ratios implied by the paper's printed tables. Right: the same model and
+    data scored on every target month available.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(10.0, 5.2), sharey=True)
+    paper_label = cfg.zero_subperiods[0][0]
+    panels = [
+        (axes[0], paper_label, f"The paper's window: targets {spans.get(paper_label, '')}"),
+        (axes[1], "full", f"Long sample: targets {spans.get('full', '')}"),
+    ]
+    for ax, sample, title in panels:
+        for h in cfg.horizons:
+            rows = _ratio_rows(versus, "zero", sample, "ns_ar", h)
+            if rows.empty:
+                continue
+            colour = HORIZON_COLOURS.get(h, INK)
+            ax.plot(
+                rows["maturity_months"],
+                rows["rmse_ratio"],
+                marker="o",
+                color=colour,
+                label=f"{h}-month horizon, this repository",
+            )
+            if sample == paper_label and h in published.DL_RMSE["ns_ar"]:
+                ratio = [
+                    a / b
+                    for a, b in zip(
+                        published.DL_RMSE["ns_ar"][h], published.DL_RMSE["rw"][h], strict=True
+                    )
+                ]
+                ax.plot(
+                    published.DL_MATURITIES,
+                    ratio,
+                    marker="s",
+                    markersize=6,
+                    markerfacecolor="white",
+                    linestyle="--",
+                    linewidth=1.1,
+                    color=colour,
+                    label=f"{h}-month horizon, printed in Diebold-Li",
+                )
+        ax.axhline(1.0, color=INK, linewidth=0.9)
+        ax.set_title(title)
+        _maturity_axis(ax)
+    axes[0].set_ylabel("Forecast RMSE / random-walk RMSE")
+    handles, labels = axes[0].get_legend_handles_labels()
+    order = sorted(range(len(labels)), key=lambda i: ("printed" in labels[i], i))
+    fig.legend(
+        [handles[i] for i in order],
+        [labels[i] for i in order],
+        loc="lower center",
+        ncols=2,
+        bbox_to_anchor=(0.5, 0.0),
     )
-    ax.legend(frameon=False, fontsize=8)
-    ax.text(
+    axes[1].text(
         0.99,
-        0.02,
+        0.03,
         "Below 1: the forecast beat the random walk",
-        transform=ax.transAxes,
+        transform=axes[1].transAxes,
         ha="right",
+        color=MUTED,
         fontsize=8,
-        color=COLOURS["grey"],
     )
+    fig.suptitle(
+        "Nelson-Siegel AR(1) forecasts of zero-coupon yields against no change",
+        x=0.01,
+        ha="left",
+        fontsize=11,
+        fontweight="bold",
+    )
+    fig.tight_layout(rect=(0, 0.14, 1, 0.95))
+    _save(fig, path)
+
+
+def fig_subperiods(versus: pd.DataFrame, cfg: Config, path: Path) -> None:
+    """Longest-horizon RMSE ratio by maturity, one line per period of the targets."""
+    h = max(cfg.horizons)
+    fig, ax = plt.subplots(figsize=(8.0, 4.4))
+    for shade, (label, _, _) in zip(PERIOD_COLOURS, cfg.zero_subperiods, strict=False):
+        rows = _ratio_rows(versus, "zero", label, "ns_ar", h)
+        if rows.empty:
+            continue
+        ax.plot(rows["maturity_months"], rows["rmse_ratio"], marker="o", color=shade, label=label)
+    ax.axhline(1.0, color=INK, linewidth=0.9)
+    _maturity_axis(ax)
+    ax.set_ylabel("Forecast RMSE / random-walk RMSE")
+    ax.set_title(f"Nelson-Siegel AR(1), {h}-month horizon, by period of the target month")
+    ax.legend(title="Targets", title_fontsize=8)
     fig.tight_layout()
+    _save(fig, path)
+
+
+def fig_variants(versus: pd.DataFrame, spans: dict[str, str], cfg: Config, path: Path) -> None:
+    """Longest-horizon ratio for each model, with and without the zero-bound years."""
+    h = max(cfg.horizons)
+    samples = ["full"] + [s for s in spans if s.startswith("excluding")]
+    fig, axes = plt.subplots(1, len(samples), figsize=(5.0 * len(samples), 4.6), sharey=True)
+    axes_list = [axes] if len(samples) == 1 else list(axes)
+    for ax, sample in zip(axes_list, samples, strict=True):
+        for model in ("ns_ar", "ar_yield", "ns_rw"):
+            rows = _ratio_rows(versus, "zero", sample, model, h)
+            if rows.empty:
+                continue
+            ax.plot(
+                rows["maturity_months"],
+                rows["rmse_ratio"],
+                marker="o",
+                color=MODEL_COLOURS[model],
+                label=F.MODEL_LABELS[model],
+            )
+        ax.axhline(1.0, color=INK, linewidth=0.9)
+        _maturity_axis(ax)
+        title = "All targets" if sample == "full" else f"Targets {sample}"
+        ax.set_title(title)
+    axes_list[0].set_ylabel("Forecast RMSE / random-walk RMSE")
+    axes_list[-1].legend(loc="upper left")
+    fig.suptitle(
+        f"{h}-month horizon: mean-reverting models and the factor random walk",
+        x=0.01,
+        ha="left",
+        fontsize=11,
+        fontweight="bold",
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
     _save(fig, path)
 
 
 def fig_loadings(loadings: pd.DataFrame, shares: FloatArray, path: Path) -> None:
     """Loadings of the first three principal components of daily changes."""
-    fig, ax = plt.subplots(figsize=(8.0, 4.6))
-    x = range(len(loadings))
+    fig, ax = plt.subplots(figsize=(8.0, 4.4))
     names = ["level", "slope", "curvature"]
     for k, key in enumerate(["pc1", "pc2", "pc3"]):
         ax.plot(
-            x,
+            loadings["maturity_months"],
             loadings[f"{key}_one_sd_bp"],
             marker="o",
             color=COLOURS[key],
             label=f"PC{k + 1} ({names[k]}), {100 * shares[k]:.1f}% of variance",
         )
-    ax.axhline(0.0, color="black", linewidth=0.8)
-    ax.set_xticks(list(x))
-    ax.set_xticklabels([_label_years(t) for t in loadings["maturity_months"]])
-    ax.set_xlabel("Maturity")
+    ax.axhline(0.0, color=INK, linewidth=0.9)
+    _maturity_axis(ax)
     ax.set_ylabel("Yield change for a one-s.d. move (basis points)")
-    ax.set_title("Principal components of daily par yield changes", fontsize=10)
-    ax.legend(frameon=False, fontsize=8)
+    ax.set_title("Principal components of daily par yield changes")
+    ax.legend()
     fig.tight_layout()
     _save(fig, path)
 
@@ -520,7 +768,7 @@ def fig_loadings(loadings: pd.DataFrame, shares: FloatArray, path: Path) -> None
 def fig_rolling(rolling: pd.DataFrame, window: int, path: Path) -> None:
     """Variance shares of the first three components through time."""
     dates = pd.to_datetime(rolling["window_end"])
-    fig, ax = plt.subplots(figsize=(8.0, 4.6))
+    fig, ax = plt.subplots(figsize=(8.0, 4.4))
     ax.stackplot(
         dates,
         rolling["pc1_pct"],
@@ -528,13 +776,13 @@ def fig_rolling(rolling: pd.DataFrame, window: int, path: Path) -> None:
         rolling["pc3_pct"],
         colors=[COLOURS["pc1"], COLOURS["pc2"], COLOURS["pc3"]],
         labels=["PC1", "PC2", "PC3"],
-        alpha=0.85,
+        alpha=0.9,
     )
     ax.set_ylim(50, 100)
     ax.set_xlabel(f"End of {window}-trading-day window")
     ax.set_ylabel("Share of variance of daily changes (%)")
-    ax.set_title("Variance explained by the first three components, rolling", fontsize=10)
-    ax.legend(frameon=False, fontsize=8, loc="lower left", ncols=3)
+    ax.set_title("Variance explained by the first three components, rolling windows")
+    ax.legend(loc="lower left", ncols=3)
     fig.tight_layout()
     _save(fig, path)
 
@@ -550,39 +798,18 @@ def fig_factors(betas: pd.DataFrame, monthly: pd.DataFrame, path: Path) -> None:
     ]
     for ax, (name, scale, emp_name, title) in zip(axes, panels, strict=True):
         ax.plot(betas.index, scale * betas[name], color=COLOURS["pc1"], label="Nelson-Siegel")
-        ax.plot(emp.index, emp[emp_name], color=COLOURS["pc2"], linestyle=":", label="empirical")
+        ax.plot(
+            emp.index,
+            emp[emp_name],
+            color=COLOURS["pc2"],
+            linestyle=":",
+            label="empirical measure",
+        )
         ax.set_title(title, fontsize=9)
         ax.set_ylabel("Percent")
-        ax.axhline(0.0, color="black", linewidth=0.5)
-    axes[0].legend(frameon=False, fontsize=8)
+        ax.axhline(0.0, color=INK, linewidth=0.6)
+    axes[0].legend()
     axes[-1].set_xlabel("Month")
-    fig.tight_layout()
-    _save(fig, path)
-
-
-def fig_subperiods(versus: pd.DataFrame, cfg: Config, path: Path) -> None:
-    """12-month RMSE ratio by maturity, one line per sub-period."""
-    h = max(cfg.horizons)
-    sub = versus[(versus["model"] == "ns_ar") & (versus["horizon_months"] == h)]
-    fig, ax = plt.subplots(figsize=(8.0, 4.6))
-    shades = ["#fdae6b", "#e6550d", "#7f2704", "#7f7f7f"]
-    samples = [label for label, _, _ in cfg.subperiods] + ["paper window"]
-    labels: list[str] = []
-    for shade, sample in zip(shades, samples, strict=True):
-        rows = sub[sub["sample"] == sample].sort_values("maturity_months")
-        if rows.empty:
-            continue
-        labels = [_label_years(t) for t in rows["maturity_months"]]
-        name = "1994-2000 (the paper's window)" if sample == "paper window" else sample
-        ax.plot(range(len(rows)), rows["rmse_ratio"], marker="o", color=shade, label=name)
-    ax.axhline(1.0, color="black", linewidth=0.8)
-    if labels:
-        ax.set_xticks(range(len(labels)))
-        ax.set_xticklabels(labels)
-    ax.set_xlabel("Maturity")
-    ax.set_ylabel("Forecast RMSE / random-walk RMSE")
-    ax.set_title(f"Nelson-Siegel AR(1), {h}-month horizon, by period of the targets", fontsize=10)
-    ax.legend(frameon=False, fontsize=8)
     fig.tight_layout()
     _save(fig, path)
 
@@ -592,10 +819,25 @@ def fig_subperiods(versus: pd.DataFrame, cfg: Config, path: Path) -> None:
 # --------------------------------------------------------------------------
 
 
+def _range(frame: pd.DataFrame, column: str = "rmse_ratio") -> dict[str, object]:
+    return {
+        "min": round(float(frame[column].min()), 3),
+        "max": round(float(frame[column].max()), 3),
+        "below_one": int((frame[column] < 1.0).sum()),
+        "maturities": len(frame),
+    }
+
+
 def _headline(
-    variants: pd.DataFrame, versus: pd.DataFrame, by_tenor: pd.DataFrame, spans: dict[str, str]
+    variants: pd.DataFrame,
+    by_tenor: pd.DataFrame,
+    rolling: pd.DataFrame,
+    versus: pd.DataFrame,
+    comparison: pd.DataFrame,
+    spans: dict[str, dict[str, str]],
 ) -> dict[str, object]:
     main = variants.iloc[0]
+    lo, hi = rolling["pc1_pct"].idxmin(), rolling["pc1_pct"].idxmax()
     out: dict[str, object] = {
         "pca_treatment": str(main["treatment"]),
         "pca_first_date": str(main["first_date"]),
@@ -606,23 +848,43 @@ def _headline(
         "pc3_pct": round(float(main["pc3_pct"]), 2),
         "first_three_pct": round(float(main["first_three_pct"]), 2),
         "min_maturity_explained_pct": round(float(by_tenor["explained_by_three_pct"].min()), 2),
-        "forecast_targets": spans.get("full", ""),
+        "rolling_pc1_min_pct": round(float(rolling.loc[lo, "pc1_pct"]), 2),
+        "rolling_pc1_min_window_end": str(rolling.loc[lo, "window_end"]),
+        "rolling_pc1_max_pct": round(float(rolling.loc[hi, "pc1_pct"]), 2),
+        "rolling_pc1_max_window_end": str(rolling.loc[hi, "window_end"]),
+        "rolling_first_three_min_pct": round(float(rolling["first_three_pct"].min()), 2),
+        "rolling_first_three_max_pct": round(float(rolling["first_three_pct"].max()), 2),
+        "forecast_samples": spans,
     }
-    full = versus[(versus["sample"] == "full") & (versus["model"] == "ns_ar")]
-    for h in sorted(full["horizon_months"].unique()):
-        rows = full[full["horizon_months"] == h]
-        out[f"h{int(h)}_forecasts"] = int(rows["forecasts"].iloc[0])
-        out[f"h{int(h)}_ratio_min"] = round(float(rows["rmse_ratio"].min()), 3)
-        out[f"h{int(h)}_ratio_max"] = round(float(rows["rmse_ratio"].max()), 3)
-        out[f"h{int(h)}_maturities_beating_rw"] = int((rows["rmse_ratio"] < 1.0).sum())
-        out[f"h{int(h)}_maturities"] = len(rows)
-        out[f"h{int(h)}_dm_min"] = round(float(rows["dm_uniform"].min()), 2)
-        out[f"h{int(h)}_dm_max"] = round(float(rows["dm_uniform"].max()), 2)
+    if not comparison.empty:
+        rep: dict[str, object] = {}
+        for (model, h), block in comparison.groupby(["model", "horizon_months"], sort=True):
+            entry: dict[str, object] = {
+                "max_abs_rmse_gap": round(float(block["rmse_gap"].abs().max()), 3),
+                "mean_abs_rmse_gap": round(float(block["rmse_gap"].abs().mean()), 3),
+            }
+            if model != "rw":
+                entry["ratio_here_min"] = round(float(block["ratio_to_rw_here"].min()), 3)
+                entry["ratio_here_max"] = round(float(block["ratio_to_rw_here"].max()), 3)
+                entry["ratio_paper_min"] = round(float(block["ratio_to_rw_paper"].min()), 3)
+                entry["ratio_paper_max"] = round(float(block["ratio_to_rw_paper"].max()), 3)
+                entry["here_below_one"] = int((block["ratio_to_rw_here"] < 1.0).sum())
+                entry["paper_below_one"] = int((block["ratio_to_rw_paper"] < 1.0).sum())
+            rep[f"{model}_h{int(h)}"] = entry
+        out["paper_window_at_five_maturities"] = rep
+    ratios: dict[str, object] = {}
+    for (panel, sample, model, h), block in versus.groupby(
+        ["panel", "sample", "model", "horizon_months"], sort=True
+    ):
+        if model in ("ns_ar", "ns_rw", "ar_yield"):
+            ratios[f"{panel}|{sample}|{model}|h{int(h)}"] = _range(block)
+    out["rmse_ratio_to_random_walk"] = ratios
     return out
 
 
 def run(
     daily: pd.DataFrame,
+    zero: pd.DataFrame,
     out_dir: Path,
     *,
     wide: pd.DataFrame | None = None,
@@ -637,12 +899,17 @@ def run(
     daily:
         Daily par yields in percent, indexed by date, one column per maturity
         label from ``tenor.data.TENOR_MONTHS``. Must hold the core maturities.
+        Used for the principal components and a second set of forecasts.
+    zero:
+        Daily zero-coupon yields in percent, indexed by date, columns the
+        maturities in months. Used for the main forecasts.
     out_dir:
         Destination directory, created if missing.
     wide:
-        Optional second panel that also holds the 20- and 30-year points.
+        Optional second par panel that also holds the 20- and 30-year points.
     fast:
-        Use a coarser step for the rolling windows. Everything else is the same.
+        Use a coarser step for the rolling principal-components windows and
+        fewer size simulations. Everything else is the same.
     cfg:
         Settings; the defaults are the ones used for the committed results.
     vintage:
@@ -653,24 +920,57 @@ def run(
     out_dir.mkdir(parents=True, exist_ok=True)
     step = cfg.rolling_step * 12 if fast else cfg.rolling_step
     monthly = D.month_end(daily)
+    zero_monthly = D.month_end(zero.loc[f"{cfg.zero_start}-01" :])
+    zero_tau = [float(c) for c in zero_monthly.columns]
+    par_tau = D.tenor_months(monthly.columns)
 
     variants = pca_variants(daily, wide)
     loadings, by_tenor, res = pca_detail(daily)
     rolling = pca_rolling(daily, cfg.rolling_window, step)
+    bills = bill_volatility(daily, cfg)
     betas, residuals, factor_stats, correlations = ns_tables(monthly)
-    errors, versus, spans = forecast_tables(monthly, cfg)
-    comparison = paper_comparison(errors, versus)
+    zero_residuals = ns_residuals_zero(zero_monthly, zero_tau)
+
+    zero_first = _month_index(zero_monthly, cfg.zero_first_target, "left")
+    if zero_first is None:
+        raise ValueError("the zero-coupon panel ends before the first forecast target")
+    zero_rows, zero_spans = forecast_tables(
+        "zero", zero_monthly, zero_tau, zero_first, cfg.zero_subperiods, cfg
+    )
+    par_rows, par_spans = forecast_tables(
+        "par", monthly, par_tau, cfg.initial_months, cfg.par_subperiods, cfg
+    )
+    roll_rows, _ = forecast_tables(
+        "zero",
+        zero_monthly,
+        zero_tau,
+        zero_first,
+        cfg.zero_subperiods,
+        cfg,
+        window=cfg.rolling_estimation_months,
+    )
+    errors = pd.DataFrame(zero_rows.errors + par_rows.errors)
+    versus = pd.DataFrame(zero_rows.versus + par_rows.versus)
+    nested = pd.DataFrame(zero_rows.nested + par_rows.nested)
+    rolling_scheme = pd.DataFrame(roll_rows.versus)
+    comparison = paper_comparison(errors, versus, cfg.zero_subperiods[0][0])
+    sizes = S.size_table(horizons=cfg.horizons, reps=500 if fast else cfg.size_simulations)
 
     tables: dict[str, pd.DataFrame] = {
         "pca_variance": variants,
         "pca_loadings": loadings,
         "pca_by_maturity": by_tenor,
         "pca_rolling": rolling,
+        "pca_bill_volatility": bills,
         "ns_fit_residuals": residuals,
+        "ns_fit_residuals_zero": zero_residuals,
         "ns_factor_stats": factor_stats,
         "ns_factor_correlations": correlations,
         "forecast_errors": errors,
         "forecast_vs_random_walk": versus,
+        "forecast_nested_tests": nested,
+        "forecast_rolling_scheme": rolling_scheme,
+        "test_size_simulation": sizes,
     }
     if not comparison.empty:
         tables["forecast_paper_window"] = comparison
@@ -680,24 +980,41 @@ def run(
     factors_out["Date"] = factors_out["Date"].dt.strftime("%Y-%m-%d")
     factors_out.to_csv(out_dir / "ns_factors.csv", index=False, lineterminator="\n")
 
-    fig_rmse_ratio(versus, spans, out_dir / "fig_forecast_rmse_ratio.png")
-    fig_loadings(loadings, res.explained, out_dir / "fig_pca_loadings.png")
-    fig_rolling(rolling, min(cfg.rolling_window, len(daily) - 1), out_dir / "fig_pca_rolling.png")
-    fig_factors(betas, monthly, out_dir / "fig_ns_factors.png")
-    fig_subperiods(versus, cfg, out_dir / "fig_forecast_subperiods.png")
+    with plt.rc_context(STYLE):
+        fig_rmse_ratio(versus, zero_spans, cfg, out_dir / "fig_forecast_rmse_ratio.png")
+        fig_subperiods(versus, cfg, out_dir / "fig_forecast_subperiods.png")
+        fig_variants(versus, zero_spans, cfg, out_dir / "fig_forecast_variants.png")
+        fig_loadings(loadings, res.explained, out_dir / "fig_pca_loadings.png")
+        fig_rolling(
+            rolling, min(cfg.rolling_window, len(daily) - 1), out_dir / "fig_pca_rolling.png"
+        )
+        fig_factors(betas, monthly, out_dir / "fig_ns_factors.png")
 
-    headline = _headline(variants, versus, by_tenor, spans)
+    spans = {"zero": zero_spans, "par": par_spans}
+    headline = _headline(variants, by_tenor, rolling, versus, comparison, spans)
     (out_dir / "headline.json").write_text(
         json.dumps(headline, indent=2) + "\n", encoding="utf-8", newline="\n"
     )
     record: dict[str, object] = {
-        "first_date": daily.index[0].strftime("%Y-%m-%d"),
-        "last_date": daily.index[-1].strftime("%Y-%m-%d"),
-        "trading_days": len(daily),
-        "months": len(monthly),
-        "maturities": list(daily.columns),
-        "days_dropped_for_missing_values": int(daily.attrs.get("dropped_rows", 0)),
-        "panel_sha256": D.panel_sha256(daily),
+        "par_panel": {
+            "first_date": daily.index[0].strftime("%Y-%m-%d"),
+            "last_date": daily.index[-1].strftime("%Y-%m-%d"),
+            "trading_days": len(daily),
+            "months": len(monthly),
+            "maturities": list(daily.columns),
+            "days_dropped_for_missing_values": int(daily.attrs.get("dropped_rows", 0)),
+            "panel_sha256": D.panel_sha256(daily),
+        },
+        "zero_panel": {
+            "first_date": zero.index[0].strftime("%Y-%m-%d"),
+            "last_date": zero.index[-1].strftime("%Y-%m-%d"),
+            "trading_days": len(zero),
+            "months_used": len(zero_monthly),
+            "first_month_used": str(zero_monthly.index[0].to_period("M")),
+            "maturities_months": [int(c) for c in zero.columns],
+            "days_dropped_for_missing_values": int(zero.attrs.get("dropped_rows", 0)),
+            "panel_sha256": D.panel_sha256(zero),
+        },
         "forecast_samples": spans,
         "fast": fast,
     }

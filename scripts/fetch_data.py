@@ -1,4 +1,6 @@
-"""Download the US Treasury's daily par yield curve, one CSV per year.
+"""Download the two public yield data sets into ``data/``.
+
+1. The US Treasury's daily par yield curve, one CSV per year.
 
 Source: U.S. Department of the Treasury, "Daily Treasury Par Yield Curve
 Rates", https://home.treasury.gov/resource-center/data-chart-center/interest-rates
@@ -6,9 +8,17 @@ The files are public, need no key and no account. They are written to
 ``data/`` (never committed) as ``par_yields_<year>.csv`` exactly as served,
 plus ``manifest.json`` with the download time and a hash of each file.
 
+2. The Federal Reserve's Gurkaynak-Sack-Wright zero-coupon curve.
+
+Source: Board of Governors of the Federal Reserve System, "Nominal Yield
+Curve", https://www.federalreserve.gov/data/nominal-yield-curve.htm, the
+data file for Gurkaynak, Sack and Wright (2007), FEDS paper 2006-28. One CSV
+of about 17 MB with daily Svensson parameters from June 1961. Public, no key,
+no account. Written to ``data/feds200628.csv`` exactly as served.
+
 Usage:
     uv run python scripts/fetch_data.py            # fetch years not yet on disk, refresh the last
-    uv run python scripts/fetch_data.py --force    # fetch every year again
+    uv run python scripts/fetch_data.py --force    # fetch everything again
 """
 
 from __future__ import annotations
@@ -32,7 +42,9 @@ URL = (
     "daily-treasury-rates.csv/{year}/all"
     "?type=daily_treasury_yield_curve&field_tdr_date_value={year}&page&_format=csv"
 )
-USER_AGENT = "tenor-fetch/0.1 (python-urllib)"
+GSW_URL = "https://www.federalreserve.gov/data/yield-curve-tables/feds200628.csv"
+GSW_FILE = "feds200628.csv"
+USER_AGENT = "tenor-fetch/0.2 (python-urllib)"
 
 
 def fetch_year(year: int, retries: int = 4) -> bytes:
@@ -52,8 +64,25 @@ def fetch_year(year: int, retries: int = 4) -> bytes:
     raise RuntimeError(f"could not download {year}: {last_error}")
 
 
+def fetch_gsw(retries: int = 4) -> bytes:
+    """Return the raw Gurkaynak-Sack-Wright CSV, retrying on transient errors."""
+    request = urllib.request.Request(GSW_URL, headers={"User-Agent": USER_AGENT})
+    last_error: Exception | None = None
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(request, timeout=180) as response:
+                body: bytes = response.read()
+            if b"\nDate,BETA0," not in body[:4000]:
+                raise ValueError(f"unexpected content: {body[:60]!r}")
+            return body
+        except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+            last_error = exc
+            time.sleep(2.0 * (attempt + 1))
+    raise RuntimeError(f"could not download {GSW_URL}: {last_error}")
+
+
 def main() -> int:
-    """Download the yearly files and write the manifest."""
+    """Download the files and write the manifest."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--force", action="store_true", help="download every year again")
     parser.add_argument("--data-dir", type=Path, default=DATA_DIR)
@@ -80,6 +109,18 @@ def main() -> int:
         }
         print(f"{year}: {rows} rows")
         time.sleep(0.3)
+
+    gsw_path = args.data_dir / GSW_FILE
+    if args.force or not gsw_path.exists() or GSW_FILE not in manifest:
+        body = fetch_gsw() if args.force or not gsw_path.exists() else gsw_path.read_bytes()
+        gsw_path.write_bytes(body)
+        manifest[GSW_FILE] = {
+            "file": GSW_FILE,
+            "bytes": len(body),
+            "sha256": hashlib.sha256(body).hexdigest(),
+            "downloaded_utc": dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        print(f"{GSW_FILE}: {len(body)} bytes")
 
     manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"

@@ -1,7 +1,7 @@
 [project]
 name = "tenor"
 version = "0.1.0"
-description = "Principal components and Nelson-Siegel / Diebold-Li forecasts of the US Treasury par yield curve"
+description = "Principal components of Treasury par yields and a replication of Diebold-Li yield curve forecasts"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.12,<3.13"
@@ -9,6 +9,7 @@ dependencies = [
     "numpy==2.5.5",
     "pandas==3.1.1",
     "matplotlib==3.11.2",
+    "scipy==1.18.1",
 ]
 
 [dependency-groups]
@@ -54,6 +55,6 @@ strict = true
 files = ["src"]
 
 [[tool.mypy.overrides]]
-module = ["pandas", "pandas.*", "matplotlib", "matplotlib.*"]
+module = ["pandas", "pandas.*", "matplotlib", "matplotlib.*", "scipy", "scipy.*"]
 ignore_missing_imports = true
 follow_imports = "skip"

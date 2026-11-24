@@ -22,3 +22,6 @@ Thumbs.db
 
 # secrets
 .env
+
+# coarse runs from reproduce.py --fast
+results_fast/
