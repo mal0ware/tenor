@@ -1,28 +1,70 @@
 {
-  "first_date": "1990-01-02",
-  "last_date": "2026-10-30",
-  "trading_days": 9211,
-  "months": 442,
-  "maturities": [
-    "3 Mo",
-    "6 Mo",
-    "1 Yr",
-    "2 Yr",
-    "3 Yr",
-    "5 Yr",
-    "7 Yr",
-    "10 Yr"
-  ],
-  "days_dropped_for_missing_values": 4,
-  "panel_sha256": "7e7e57bbf57d24a5f2d832ba19f2f749d04482425f94fa696b30cf6ddbe15230",
+  "par_panel": {
+    "first_date": "1990-01-02",
+    "last_date": "2026-10-30",
+    "trading_days": 9211,
+    "months": 442,
+    "maturities": [
+      "3 Mo",
+      "6 Mo",
+      "1 Yr",
+      "2 Yr",
+      "3 Yr",
+      "5 Yr",
+      "7 Yr",
+      "10 Yr"
+    ],
+    "days_dropped_for_missing_values": 4,
+    "panel_sha256": "7e7e57bbf57d24a5f2d832ba19f2f749d04482425f94fa696b30cf6ddbe15230"
+  },
+  "zero_panel": {
+    "first_date": "1985-01-02",
+    "last_date": "2026-10-30",
+    "trading_days": 10443,
+    "months_used": 502,
+    "first_month_used": "1985-01",
+    "maturities_months": [
+      3,
+      6,
+      9,
+      12,
+      15,
+      18,
+      21,
+      24,
+      30,
+      36,
+      48,
+      60,
+      72,
+      84,
+      96,
+      108,
+      120
+    ],
+    "days_dropped_for_missing_values": 471,
+    "panel_sha256": "956279762a4e9bb067c9442a14c72f34897e21192b9ce08c1ef733f76f496dde"
+  },
   "forecast_samples": {
-    "full": "1999-01 to 2026-10",
-    "1999-2008": "1999-01 to 2008-12",
-    "2009-2017": "2009-01 to 2017-12",
-    "2018-2026": "2018-01 to 2026-10",
-    "paper window": "1994-01 to 2000-12"
+    "zero": {
+      "full": "1994-01 to 2026-10",
+      "1994-2000": "1994-01 to 2000-12",
+      "2001-2008": "2001-01 to 2008-12",
+      "2009-2017": "2009-01 to 2017-12",
+      "2018-2026": "2018-01 to 2026-10",
+      "excluding 2009-2017": "1994-01 to 2026-10 without 2009-01 to 2017-12"
+    },
+    "par": {
+      "full": "1999-01 to 2026-10",
+      "1999-2008": "1999-01 to 2008-12",
+      "2009-2017": "2009-01 to 2017-12",
+      "2018-2026": "2018-01 to 2026-10",
+      "excluding 2009-2017": "1999-01 to 2026-10 without 2009-01 to 2017-12"
+    }
   },
   "fast": false,
-  "source": "US Treasury daily par yield curve rates",
+  "par_source": "US Treasury daily par yield curve rates",
+  "zero_source": "Federal Reserve, Gurkaynak-Sack-Wright curve (feds200628.csv)",
+  "zero_max_gap_to_published_whole_year_yields": 0.0004,
   "sample_end": "2026-10-31"
 }

@@ -1,0 +1,43 @@
+design,statistic,horizon_months,forecasts,simulations,nominal_pct,rate_pct
+"independent errors, equal accuracy",dm_uniform_normal,1,84,5000,5.0000,5.4800
+"independent errors, equal accuracy",dm_hln_t,1,84,5000,5.0000,5.0400
+"independent errors, equal accuracy",dm_bartlett_normal,1,84,5000,5.0000,5.4800
+random walk against recursive AR(1),cw_one_sided,1,84,5000,5.0000,5.1600
+random walk against recursive AR(1),dm_hln_t_two_sided,1,84,5000,5.0000,10.5800
+random walk against recursive AR(1),dm_hln_t_favouring_random_walk,1,84,5000,5.0000,9.7200
+random walk against recursive AR(1),ar1_has_higher_mse,1,84,5000,5.0000,74.3200
+"independent errors, equal accuracy",dm_uniform_normal,6,84,5000,5.0000,9.9000
+"independent errors, equal accuracy",dm_hln_t,6,84,5000,5.0000,7.7800
+"independent errors, equal accuracy",dm_bartlett_normal,6,84,5000,5.0000,12.0000
+random walk against recursive AR(1),cw_one_sided,6,84,5000,5.0000,10.5200
+random walk against recursive AR(1),dm_hln_t_two_sided,6,84,5000,5.0000,8.1000
+random walk against recursive AR(1),dm_hln_t_favouring_random_walk,6,84,5000,5.0000,5.4000
+random walk against recursive AR(1),ar1_has_higher_mse,6,84,5000,5.0000,73.7800
+"independent errors, equal accuracy",dm_uniform_normal,12,84,5000,5.0000,16.5800
+"independent errors, equal accuracy",dm_hln_t,12,84,5000,5.0000,11.3000
+"independent errors, equal accuracy",dm_bartlett_normal,12,84,5000,5.0000,15.2000
+random walk against recursive AR(1),cw_one_sided,12,84,5000,5.0000,15.1400
+random walk against recursive AR(1),dm_hln_t_two_sided,12,84,5000,5.0000,9.9600
+random walk against recursive AR(1),dm_hln_t_favouring_random_walk,12,84,5000,5.0000,6.1800
+random walk against recursive AR(1),ar1_has_higher_mse,12,84,5000,5.0000,73.6600
+"independent errors, equal accuracy",dm_uniform_normal,1,394,5000,5.0000,4.7200
+"independent errors, equal accuracy",dm_hln_t,1,394,5000,5.0000,4.5600
+"independent errors, equal accuracy",dm_bartlett_normal,1,394,5000,5.0000,4.7200
+random walk against recursive AR(1),cw_one_sided,1,394,5000,5.0000,3.4400
+random walk against recursive AR(1),dm_hln_t_two_sided,1,394,5000,5.0000,18.6400
+random walk against recursive AR(1),dm_hln_t_favouring_random_walk,1,394,5000,5.0000,18.5800
+random walk against recursive AR(1),ar1_has_higher_mse,1,394,5000,5.0000,90.9000
+"independent errors, equal accuracy",dm_uniform_normal,6,394,5000,5.0000,5.5600
+"independent errors, equal accuracy",dm_hln_t,6,394,5000,5.0000,5.2000
+"independent errors, equal accuracy",dm_bartlett_normal,6,394,5000,5.0000,8.8400
+random walk against recursive AR(1),cw_one_sided,6,394,5000,5.0000,5.3400
+random walk against recursive AR(1),dm_hln_t_two_sided,6,394,5000,5.0000,10.7400
+random walk against recursive AR(1),dm_hln_t_favouring_random_walk,6,394,5000,5.0000,10.6000
+random walk against recursive AR(1),ar1_has_higher_mse,6,394,5000,5.0000,91.3600
+"independent errors, equal accuracy",dm_uniform_normal,12,394,5000,5.0000,7.1400
+"independent errors, equal accuracy",dm_hln_t,12,394,5000,5.0000,6.1800
+"independent errors, equal accuracy",dm_bartlett_normal,12,394,5000,5.0000,10.6200
+random walk against recursive AR(1),cw_one_sided,12,394,5000,5.0000,7.1000
+random walk against recursive AR(1),dm_hln_t_two_sided,12,394,5000,5.0000,8.3400
+random walk against recursive AR(1),dm_hln_t_favouring_random_walk,12,394,5000,5.0000,8.0800
+random walk against recursive AR(1),ar1_has_higher_mse,12,394,5000,5.0000,91.9000
